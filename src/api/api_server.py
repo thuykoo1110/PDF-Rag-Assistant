@@ -24,7 +24,8 @@ from src.data.parser        import process_pdf
 from src.pipeline.retriever import (
     search_workspace, add_chunks_to_workspace,
     delete_workspace, list_workspaces,
-    list_files_in_workspace, get_or_create_collection
+    list_files_in_workspace, get_or_create_collection,
+    get_full_text_by_file # Helper Func to sumarize_doc
 )
 from src.models.llm_generator import (
     generate_cited_answer, summarize_doc, explain_term,
@@ -454,10 +455,38 @@ async def chat_web(body: WebChatRequest):
 @app.post("/api/summarize", response_model=SummarizeResponse)
 async def summarize(body: SummarizeRequest):
     try:
-        query = f"Nội dung chính của file {body.file_name}" if body.file_name else "Tóm tắt toàn bộ tài liệu"
-        chunks = search_workspace(query, body.workspace_name, top_k=10)
-        result = summarize_doc(chunks)
+        # Trường hợp 1: Frontend truyền cụ thể tên file cần tóm tắt
+        if body.file_name and body.file_name.strip():
+            full_text = get_full_text_by_file(body.file_name, body.workspace_name)
+            if not full_text.strip():
+                raise HTTPException(status_code=44, detail=f"Không tìm thấy dữ liệu hoặc file '{body.file_name}' rỗng.")
+        
+        # Trường hợp 2: Frontend KHÔNG truyền file_name (bấm nút chung ở topbar)
+        else:
+            # Lấy danh sách toàn bộ file trong workspace bằng hàm có sẵn của Phi
+            all_files = list_files_in_workspace(body.workspace_name)
+            if not all_files:
+                raise HTTPException(status_code=404, detail=f"Workspace '{body.workspace_name}' chưa có file nào để tóm tắt.")
+            
+            # Quét qua từng file để lấy text và gộp lại
+            text_segments = []
+            for fname in all_files:
+                f_text = get_full_text_by_file(fname, body.workspace_name)
+                if f_text.strip():
+                    text_segments.append(f"--- NỘI DUNG FILE: {fname} ---\n{f_text}")
+            
+            full_text = "\n\n".join(text_segments)
+
+        # Kiểm tra cuối cùng xem tổng lượng text thu được có bị rỗng không
+        if not full_text.strip():
+            raise HTTPException(status_code=400, detail="Không thu thập được nội dung văn bản nào để tóm tắt.")
+
+        # Gọi hàm xử lý truyền chuỗi văn bản thuần sang cho Tiến xử lý với Gemini
+        result = summarize_doc(full_text)
         return SummarizeResponse(**result)
+        
+    except HTTPException as he:
+        raise he
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
