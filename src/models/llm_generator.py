@@ -85,24 +85,29 @@ def generate_cited_answer(
 # ════════════════════════════════════════════════════════════════════════════
 
 def summarize_doc(
-    retrieved_chunks: List[RetrievedChunk],
+    doc_text: str,
     model_name: str = DEFAULT_LLM_MODEL
 ) -> AnswerDict:
-    context = _build_context(retrieved_chunks)
-    prompt  = f"""Bạn là chuyên gia phân tích. Hãy tóm tắt ngắn gọn nội dung cốt lõi dựa trên phần Context dưới đây.
+    """Tóm tắt ngắn gọn nội dung cốt lõi dựa trên toàn bộ văn bản của tài liệu."""
+    if not doc_text.strip():
+        return {"summary": "⚠️ Tài liệu không có nội dung văn bản để tóm tắt.", "model": model_name}
+
+    prompt = f"""Bạn là chuyên gia phân tích tài liệu cao cấp. Hãy đọc toàn bộ văn bản được cung cấp dưới đây và viết một bản tóm tắt ngắn gọn, súc tích về nội dung cốt lõi của tài liệu này.
 
 ---
-CONTEXT:
-{context}
+VĂN BẢN TOÀN VẸN:
+{doc_text}
 ---
+
 YÊU CẦU:
-- Bố cục rõ ràng (dùng gạch đầu dòng).
-- Độ dài khoảng 3-5 câu chất lượng.
+- Bố cục rõ ràng, mạch lạc (sử dụng dấu gạch đầu dòng).
+- Tập trung vào mục đích chính, các luận điểm cốt lõi hoặc định nghĩa quan trọng nhất.
+- Độ dài khoảng 3-5 câu chất lượng cao.
 
 TÓM TẮT:"""
 
     try:
-        model    = genai.GenerativeModel(model_name)
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(temperature=0.2)
@@ -111,7 +116,7 @@ TÓM TẮT:"""
     except Exception as e:
         ans = f"⚠️ Lỗi tóm tắt: {str(e)}"
 
-    return {"answer": ans, "citations": [], "model": model_name}
+    return {"summary": ans, "citations": [], "model": model_name}
 
 
 # ════════════════════════════════════════════════════════════════════════════

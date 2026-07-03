@@ -844,18 +844,88 @@ function highlightSrc(fileName) {
 //  SUMMARIZE
 // ════════════════════════════════════════════════════════════════════════════
 async function doSummarize() {
-  if (!selectedWs) { showToast('⚠️ Chọn workspace trước!', true); return; }
-  addTyping();
+  if (!selectedWs) {
+    showToast('⚠️ Vui lòng chọn một workspace trước khi tóm tắt!', true);
+    return;
+  }
+
+  // Khởi tạo request payload mặc định cho Workspace
+  const payload = {
+    workspace_name: selectedWs,
+    file_name: null // Mặc định là null để tóm tắt toàn bộ tài liệu trong workspace
+  };
+
+  // KIỂM TRA: Nếu người dùng đang active (chọn xem) một file cụ thể ở bên phải
+  // (Dựa trên biến activeSrc lưu vị trí index của file đang chọn trong mảng tài liệu)
+  const srcCards = document.querySelectorAll('#srcList .src-card');
+  const activeCard = document.querySelector('#srcList .src-card.active');
+  
+  if (activeCard) {
+    // Lấy tên file trực tiếp từ thuộc tính data của card đang active
+    const activeFileName = activeCard.querySelector('.src-card-name').textContent.replace('📄', '').trim();
+    if (activeFileName) {
+      payload.file_name = activeFileName;
+    }
+  }
+
+  // Hiển thị trạng thái đang xử lý (Typing indicator) trong khung chat
+  appendBotTyping();
+
   try {
-    const r = await fetch(`${API}/api/summarize`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({workspace_name:selectedWs})
+    const response = await fetch(`${API}/api/summarize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
-    const d = await r.json(); rmTyping();
-    chatHistory.push({ role:'assistant', content:'📝 <strong>Tóm tắt:</strong><br/>'+(d.summary||'Không có nội dung.'), citations:[], webResults:[] });
-  } catch(e) { rmTyping(); showToast('Lỗi: '+e.message,true); }
-  renderChat();
-  await persistSession();
+
+    removeBotTyping();
+
+    if (!response.ok) {
+      const errData = await response.json();
+      throw new Error(errData.detail || 'Lỗi hệ thống');
+    }
+
+    const data = await response.json();
+    
+    // Đẩy kết quả tóm tắt vào khung chat
+    const titleHeader = payload.file_name 
+      ? `📋 **Bản tóm tắt tài liệu: ${payload.file_name}**\n\n`
+      : `📋 **Bản tóm tắt tổng quan Workspace [${selectedWs}]**\n\n`;
+
+    chatHistory.push({
+      role: 'assistant',
+      content: titleHeader + data.summary,
+      citations: []
+    });
+
+    renderChat();
+    if (currentUser) persistSession();
+
+  } catch (error) {
+    removeBotTyping();
+    showToast('❌ Không thể tóm tắt: ' + error.message, true);
+  }
+}
+
+// ── Hàm bổ trợ hiển thị trạng thái chờ phản hồi ──
+function appendBotTyping() {
+  const chatMsgs = document.getElementById('chatMsgs');
+  const typingDiv = document.createElement('div');
+  typingDiv.id = 'botTypingIndicator';
+  typingDiv.className = 'msg';
+  typingDiv.innerHTML = `
+    <div class="av bot">🤖</div>
+    <div class="bub bot">
+      <div class="typing"><span></span><span></span><span></span></div>
+    </div>
+  `;
+  chatMsgs.appendChild(typingDiv);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+}
+
+function removeBotTyping() {
+  const indicator = document.getElementById('botTypingIndicator');
+  if (indicator) indicator.remove();
 }
 
 // ════════════════════════════════════════════════════════════════════════════

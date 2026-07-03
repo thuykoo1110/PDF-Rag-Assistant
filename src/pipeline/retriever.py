@@ -425,6 +425,45 @@ def hybrid_search(
 
     return sorted(reranked, key=lambda chunk: chunk["score"], reverse=True)[:top_k]
 
+# =============================================================================
+# Helper Function to summarize_doc
+# =============================================================================
+def get_full_text_by_file(file_name: str, workspace_name: str) -> str:
+    """
+    [MỚI] Lấy toàn bộ văn bản thuần của một file trong workspace,
+    phục vụ cho tính năng tóm tắt tài liệu bằng LLM Context lớn (Gemini).
+    """
+    try:
+        collection = _get_collection(workspace_name)
+    except ValueError:
+        return ""
+
+    # Dùng .get() lọc chính xác file_name trong metadata
+    result = collection.get(
+        where={
+            "$and": [
+                {"workspace_name": workspace_name},
+                {"file_name": file_name}
+            ]
+        },
+        include=["documents", "metadatas"]
+    )
+
+    documents = result.get("documents") or []
+    metadatas = result.get("metadatas") or []
+
+    if not documents:
+        return ""
+
+    # Gộp document và page thành tuple rồi sort theo số trang tăng dần
+    sorted_pages = sorted(
+        zip(documents, metadatas),
+        key=lambda pair: pair[1].get("page", 0) if pair[1] else 0
+    )
+
+    # Nối tất cả các chuỗi văn bản lại thành một văn bản toàn vẹn
+    full_text = "\n".join([page[0] for page in sorted_pages])
+    return full_text
 
 # =============================================================================
 # BACKWARD COMPATIBILITY — Giữ lại class cũ để không break code hiện tại
