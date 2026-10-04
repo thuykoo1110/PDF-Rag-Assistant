@@ -3,10 +3,13 @@ import re
 import pymupdf 
 import pdfplumber
 
-from typing import List, Dict, Any
+from collections import Counter
+from typing import List, Dict, Any, Tuple
 
 ChunkDict = Dict[str, Any]
+BBox = Tuple[float, float, float, float]  # (x0, y0, x1, y1), gốc tọa độ ở góc trên trái
 
+MAX_HEADING_LEN = 120 
 
 # =============================================================================
 # TASK 1.1 + 1.2 + 1.3 — HÀM CHÍNH (Pipeline hoàn chỉnh)
@@ -17,8 +20,8 @@ def process_pdf(file_path: str, workspace_name: str) -> List[ChunkDict]:
         raise FileNotFoundError(f'không thấy file: {file_path}')
     if not workspace_name:
         raise ValueError("workspace_name empty")
-    text_chunk = _extract_text_chunks(file_path, workspace_name)
-    table_chunk = _extract_table_chunks(file_path, workspace_name)
+    table_chunk, table_bboxes = _extract_table_chunks(file_path, workspace_name)
+    text_chunk = _extract_text_chunks(file_path, workspace_name, table_bboxes)
 
     sum_chunk = text_chunk + table_chunk
     sum_chunk.sort(key= lambda x: x["metadata"]["page"])  # xếp theo trang
@@ -26,64 +29,104 @@ def process_pdf(file_path: str, workspace_name: str) -> List[ChunkDict]:
     return sum_chunk
 
 
-# =============================================================================
-# TASK 1.1 — HELPER: Extract text với PyMuPDF
-# =============================================================================
+def _body_font_size(pages_blocks: List[List[dict]]) -> float:
 
-def _extract_text_chunks(file_path: str, workspace_name: str) -> List[ChunkDict]:
+    counter = Counter()
+    for blocks in pages_blocks:
+        for block in blocks:
+            if block.get("type") != 0:  # chỉ lấy text block
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    n_chars = len(span.get("text", "").strip())
+                    if n_chars:
+                        counter[round(span.get("size", 0), 1)] += n_chars
+    return counter.most_common(1)[0][0] if counter else 12.0
+
+
+def _join_lines(lines: List[str]) -> str:
+    out = ""
+    for raw in lines:
+        line = raw.replace("­", "").strip()  # bỏ soft hyphen, khoảng trắng đầu/cuối
+        if not line:
+            continue
+        if not out:
+            out = line
+        elif out.endswith("-") and len(out) > 1 and out[-2].isalpha() and line[0].islower():
+            out = out[:-1] + line
+        else:
+            out += " " + line
+    return out
+
+
+def _overlaps(bbox: BBox, regions: List[BBox], thr: float = 0.5) -> bool:
+    area = max((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), 1e-6)
+    for r in regions:
+        ix = max(0.0, min(bbox[2], r[2]) - max(bbox[0], r[0]))
+        iy = max(0.0, min(bbox[3], r[3]) - max(bbox[1], r[1]))
+        if ix * iy / area > thr:
+            return True
+    return False
+
+
+def _extract_text_chunks(
+    file_path: str,
+    workspace_name: str,
+    table_bboxes: Dict[int, List[BBox]] = None,
+) -> List[ChunkDict]:
     """
-    (Private) Dùng PyMuPDF (fitz) đọc text, nhận diện block Heading/Paragraph,
+    Dùng PyMuPDF đọc text, nhận diện block Heading/Paragraph,
     rồi cắt thành chunk có nghĩa và gắn metadata.
 
     Args:
         file_path      (str): Đường dẫn file PDF
         workspace_name (str): Tên workspace
+        table_bboxes   (dict): {số trang (từ 1): [bbox bảng, ...]} từ _extract_table_chunks;
+                               các block nằm trong bảng sẽ bị bỏ qua vì đã có chunk "table".
 
     Returns:
-        List[ChunkDict]: Các chunk loại "text" và "heading"
+        List[ChunkDict]: Các chunk loại "text"
     """
     chunks = []
     filename = os.path.basename(file_path)
+    table_bboxes = table_bboxes or {}
 
     with pymupdf.open(file_path) as document:
         cur_heading = ''
         cur_chunk_text = ''
         page_start = 1
 
-        for page_index in range(len(document)):
-            page = document[page_index]
+        # Đọc block của mọi trang một lần, rồi tính cỡ chữ thân bài của cả tài liệu
+        pages_blocks = [page.get_text('dict').get('blocks', []) for page in document]
+        body_font_size = _body_font_size(pages_blocks)
 
-            blocks = page.get_text('dict').get('blocks', [])
-
-            # lấy font size
-            total_size = 0
-            total_spans = 0
-            for block in blocks:
-                if block.get("type") == 0: # text block
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            if span.get('text', " ").strip():
-                                total_size += span.get('size', 0)
-                                total_spans +=1
-            font_size_avg = (total_size/total_spans) if total_spans > 0 else 12.0
+        for page_index, blocks in enumerate(pages_blocks):
+            page_tables = table_bboxes.get(page_index + 1, [])
 
             # phân loại block
             for block in blocks:
-                block_text = ""
+                # bỏ qua block nằm trong bảng 
+                if page_tables and _overlaps(block.get('bbox', (0, 0, 0, 0)), page_tables):
+                    continue
+
+                line_texts = []
                 max_font_block = 0.0
 
                 for line in block.get('lines', []):
+                    line_text = ""
                     for span in line.get('spans', []):
-                        block_text += span.get('text', "")
+                        line_text += span.get('text', "")
                         if span.get('size', 0) > max_font_block:
                             max_font_block = span.get('size', 0)
-                
-                block_text = block_text.strip()
+                    line_texts.append(line_text)
+
+                # nối các dòng bằng khoảng trắng (không để chữ dính nhau ở chỗ xuống dòng)
+                block_text = _join_lines(line_texts).strip()
 
                 if not block_text: continue
 
                 # heading
-                if _is_heading(block_text, max_font_block, font_size_avg):
+                if _is_heading(block_text, max_font_block, body_font_size):
                     # đẩy chunk cũ list chunk
                     if cur_chunk_text:
                         chunks.append({
@@ -139,16 +182,28 @@ def _extract_text_chunks(file_path: str, workspace_name: str) -> List[ChunkDict]
 # TASK 1.1 — HELPER: Extract bảng biểu với pdfplumber
 # =============================================================================
 
-def _extract_table_chunks(file_path: str, workspace_name: str) -> List[ChunkDict]:
+def _extract_table_chunks(
+    file_path: str, workspace_name: str
+) -> Tuple[List[ChunkDict], Dict[int, List[BBox]]]:
+    """
+    Trích bảng bằng pdfplumber.
+
+    Returns:
+        (chunks, table_bboxes): chunk loại "table" và bbox của từng bảng theo trang
+        ({số trang từ 1: [bbox, ...]}) để phần text bỏ qua vùng bảng.
+    """
     chunks = []
+    table_bboxes: Dict[int, List[BBox]] = {}
     filename = os.path.basename(file_path)
 
     with pdfplumber.open(file_path) as pdf:
         for page_idx, page in enumerate(pdf.pages, start=1):
-            tables = page.extract_tables()
-            for table in tables:
+            # find_tables() cho cả bbox lẫn nội dung (cùng cách phát hiện với extract_tables)
+            for found in page.find_tables():
+                table = found.extract()
                 if not table: continue
-            
+                table_bboxes.setdefault(page_idx, []).append(tuple(found.bbox))
+
                 markdow_table = ""
                 for i, row in enumerate(table):
                     row_cleaning = [str(cell).replace("\n", "") if cell is not None else "" for cell in row] 
@@ -164,21 +219,23 @@ def _extract_table_chunks(file_path: str, workspace_name: str) -> List[ChunkDict
                             "file_name": filename,
                             "page": page_idx,
                             "workspace_name": workspace_name,
-                            "chunk_type": "text",
+                            "chunk_type": "table",
                             "heading": "bảng"
                         }
                     })
-    return chunks
+    return chunks, table_bboxes
 
 # =============================================================================
 # TASK 1.2 — HELPER: Nhận diện Heading
 # =============================================================================
 
-def _is_heading(text: str, font_size: float, avg_font_size: float) -> bool:
+def _is_heading(text: str, font_size: float, body_font_size: float) -> bool:
     text = text.strip()
     if not text:  return False
 
-    if font_size >= avg_font_size * 1.25: return True 
+    if len(text) > MAX_HEADING_LEN:  return False
+
+    if font_size >= body_font_size * 1.25: return True
     
     pattern = r"(?i)^(" \
               r"chương\s+\d+|phần\s+[IVXLCDM]+|bài\s+\d+|mục\s+\d+|" \
